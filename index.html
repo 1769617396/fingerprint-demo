@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-HK">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>JS Capability Snapshot (Demo)</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
+    h1 { font-size: 18px; margin: 0 0 12px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    button { padding: 10px 12px; border: 1px solid #ccc; background: #fff; border-radius: 8px; cursor: pointer; }
+    button:active { transform: translateY(1px); }
+    pre { white-space: pre-wrap; word-break: break-word; background: #0b0f14; color: #d7e3f4; padding: 12px; border-radius: 10px; overflow: auto; }
+    .hint { color: #666; font-size: 13px; margin-top: 8px; }
+    .ok { color: #0a7; font-weight: 600; }
+    .bad { color: #c33; font-weight: 600; }
+    .kv { display: grid; grid-template-columns: 180px 1fr; gap: 6px 10px; background: #f6f7f9; padding: 12px; border-radius: 10px; }
+    code { background: #eef; padding: 0 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>JS Capability Snapshot (Demo)</h1>
+
+  <div class="row">
+    <button id="btn-refresh">Refresh</button>
+    <button id="btn-copy">Copy JSON</button>
+    <button id="btn-download">Download JSON</button>
+  </div>
+
+  <div class="kv" id="summary"></div>
+  <div class="hint">
+    说明：这是用于“对比/诊断”的能力采样页，不包含绕过或反检测逻辑。建议用同一 Wi-Fi 下，iPhone 直接访问本页。
+  </div>
+
+  <h2 style="font-size:16px;margin:16px 0 8px;">Raw JSON</h2>
+  <pre id="out">Loading…</pre>
+
+<script>
+(async function () {
+  const outEl = document.getElementById('out');
+  const summaryEl = document.getElementById('summary');
+  const btnRefresh = document.getElementById('btn-refresh');
+  const btnCopy = document.getElementById('btn-copy');
+  const btnDownload = document.getElementById('btn-download');
+
+  function safe(fn, fallback = null) {
+    try { return fn(); } catch { return fallback; }
+  }
+
+  function mm(q) {
+    return safe(() => matchMedia(q).matches, null);
+  }
+
+  function nowISO() {
+    return new Date().toISOString();
+  }
+
+  function getTimezone() {
+    return safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone, null);
+  }
+
+  function getIntlLocale() {
+    return safe(() => Intl.DateTimeFormat().resolvedOptions().locale, null);
+  }
+
+  function getUAData() {
+    const uad = navigator.userAgentData;
+    if (!uad) return null;
+    // Note: iOS Safari/Chrome may not expose UA-CH. Keep it diagnostic-only.
+    return {
+      platform: safe(() => uad.platform, null),
+      mobile: safe(() => uad.mobile, null),
+      brands: safe(() => uad.brands, null),
+      // getHighEntropyValues may be unavailable or require HTTPS; we don't force it.
+    };
+  }
+
+  function getWebGLInfo() {
+    const canvas = document.createElement('canvas');
+    const gl =
+      canvas.getContext('webgl') ||
+      canvas.getContext('experimental-webgl') ||
+      canvas.getContext('webgl2');
+
+    if (!gl) return { supported: false };
+
+    const info = { supported: true, context: gl instanceof WebGL2RenderingContext ? 'webgl2' : 'webgl' };
+
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    info.vendor = safe(() => gl.getParameter(gl.VENDOR), null);
+    info.renderer = safe(() => gl.getParameter(gl.RENDERER), null);
+
+    if (dbg) {
+      info.unmaskedVendor = safe(() => gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL), null);
+      info.unmaskedRenderer = safe(() => gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL), null);
+    } else {
+      info.unmaskedVendor = null;
+      info.unmaskedRenderer = null;
+    }
+
+    info.version = safe(() => gl.getParameter(gl.VERSION), null);
+    info.shadingLanguageVersion = safe(() => gl.getParameter(gl.SHADING_LANGUAGE_VERSION), null);
+    info.extensions = safe(() => gl.getSupportedExtensions(), null);
+
+    return info;
+  }
+
+  async function getMediaDevicesSummary() {
+    const hasMediaDevices = !!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices);
+    if (!hasMediaDevices) return { hasMediaDevices: false, devices: null, error: null };
+
+    // enumerateDevices may require permissions to show labels; we only count types.
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const counts = devices.reduce((acc, d) => {
+        const k = d.kind || 'unknown';
+        acc[k] = (acc[k] || 0) + 1;
+        return acc;
+      }, {});
+      return { hasMediaDevices: true, devices: counts, error: null };
+    } catch (e) {
+      return { hasMediaDevices: true, devices: null, error: String(e && e.message ? e.message : e) };
+    }
+  }
+
+  function basicChecks(snapshot) {
+    // These are *diagnostic* checks only, not anti-detection logic.
+    const hints = [];
+
+    // Example: on iPhone, hover:hover is usually false
+    if (snapshot.media.hover === true) hints.push({ key: 'hover', level: 'warn', msg: 'hover:hover=true (typical desktop-like signal)' });
+
+    // Example: coarse pointer is common on phones
+    if (snapshot.media.pointerCoarse === false) hints.push({ key: 'pointer', level: 'warn', msg: 'pointer:coarse=false (typical non-touch primary pointer)' });
+
+    return hints;
+  }
+
+  async function collect() {
+    const snapshot = {
+      collectedAt: nowISO(),
+      location: {
+        timezone: getTimezone(),
+        intlLocale: getIntlLocale(),
+        languages: safe(() => navigator.languages, null),
+      },
+      navigator: {
+        userAgent: safe(() => navigator.userAgent, null),
+        platform: safe(() => navigator.platform, null),
+        vendor: safe(() => navigator.vendor, null),
+        hardwareConcurrency: safe(() => navigator.hardwareConcurrency, null),
+        deviceMemoryGB: safe(() => navigator.deviceMemory, null),
+        maxTouchPoints: safe(() => navigator.maxTouchPoints, null),
+        webdriver: safe(() => navigator.webdriver, null),
+        cookieEnabled: safe(() => navigator.cookieEnabled, null),
+        doNotTrack: safe(() => navigator.doNotTrack, null),
+        uaData: getUAData(),
+      },
+      screen: {
+        width: safe(() => screen.width, null),
+        height: safe(() => screen.height, null),
+        availWidth: safe(() => screen.availWidth, null),
+        availHeight: safe(() => screen.availHeight, null),
+        colorDepth: safe(() => screen.colorDepth, null),
+        pixelDepth: safe(() => screen.pixelDepth, null),
+        devicePixelRatio: safe(() => window.devicePixelRatio, null),
+      },
+      media: {
+        pointerCoarse: mm('(pointer: coarse)'),
+        pointerFine: mm('(pointer: fine)'),
+        hoverHover: mm('(hover: hover)'),
+        hoverNone: mm('(hover: none)'),
+        anyPointerCoarse: mm('(any-pointer: coarse)'),
+        anyHoverHover: mm('(any-hover: hover)'),
+        prefersColorSchemeDark: mm('(prefers-color-scheme: dark)'),
+        prefersReducedMotion: mm('(prefers-reduced-motion: reduce)'),
+      },
+      features: {
+        hasWindowChrome: safe(() => !!window.chrome, null),
+        hasRTCPeerConnection: safe(() => typeof RTCPeerConnection !== 'undefined', null),
+        hasAudioContext: safe(() => typeof (window.AudioContext || window.webkitAudioContext) !== 'undefined', null),
+        hasWebAssembly: safe(() => typeof WebAssembly !== 'undefined', null),
+        hasServiceWorker: safe(() => 'serviceWorker' in navigator, null),
+        hasSharedArrayBuffer: safe(() => typeof SharedArrayBuffer !== 'undefined', null),
+      },
+      webgl: getWebGLInfo(),
+      mediaDevices: await getMediaDevicesSummary(),
+    };
+
+    snapshot.diagnostics = {
+      notes: basicChecks(snapshot),
+    };
+
+    return snapshot;
+  }
+
+  function renderSummary(s) {
+    const rows = [
+      ['UA', s.navigator.userAgent],
+      ['UA-CH (uaData)', s.navigator.uaData ? JSON.stringify(s.navigator.uaData) : 'null'],
+      ['platform', s.navigator.platform],
+      ['maxTouchPoints', String(s.navigator.maxTouchPoints)],
+      ['pointer:coarse', String(s.media.pointerCoarse)],
+      ['hover:hover', String(s.media.hoverHover)],
+      ['window.chrome', String(s.features.hasWindowChrome)],
+      ['webdriver', String(s.navigator.webdriver)],
+      ['WebGL', s.webgl.supported ? `${s.webgl.context} / ${s.webgl.unmaskedRenderer || s.webgl.renderer || 'n/a'}` : 'not supported'],
+      ['mediaDevices', s.mediaDevices.hasMediaDevices ? JSON.stringify(s.mediaDevices.devices) : 'not available'],
+      ['timezone', s.location.timezone || 'null'],
+      ['collectedAt', s.collectedAt],
+    ];
+
+    const html = rows.map(([k, v]) => `<div><b>${k}</b></div><div>${escapeHtml(v ?? '')}</div>`).join('');
+    summaryEl.innerHTML = html;
+
+    // simple highlight
+    const warn = (s.diagnostics?.notes || []).some(n => n.level === 'warn');
+    const hint = document.createElement('div');
+    hint.style.gridColumn = '1 / -1';
+    hint.style.marginTop = '8px';
+    hint.innerHTML = warn
+      ? `<span class="bad">Diagnostics:</span> ${s.diagnostics.notes.map(n => escapeHtml(n.msg)).join(' | ')}`
+      : `<span class="ok">Diagnostics:</span> no obvious desktop-like contradictions from these basic checks`;
+    summaryEl.appendChild(hint);
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, (m) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[m]));
+  }
+
+  async function refresh() {
+    outEl.textContent = 'Collecting…';
+    const s = await collect();
+    const json = JSON.stringify(s, null, 2);
+    outEl.textContent = json;
+    renderSummary(s);
+    return json;
+  }
+
+  let lastJSON = await refresh();
+
+  btnRefresh.onclick = async () => { lastJSON = await refresh(); };
+
+  btnCopy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(lastJSON);
+      alert('Copied JSON to clipboard.');
+    } catch {
+      // Fallback
+      const ta = document.createElement('textarea');
+      ta.value = lastJSON;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      alert('Copied (fallback).');
+    }
+  };
+
+  btnDownload.onclick = () => {
+    const blob = new Blob([lastJSON], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'capability-snapshot.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+})();
+</script>
+</body>
+</html>
