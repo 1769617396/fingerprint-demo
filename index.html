@@ -1,175 +1,423 @@
 <!doctype html>
-<html lang="zh-HK">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>iPhone Chrome JS Capability Snapshot</title>
+  <title>fingerprint-demo (WebGL full)</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 16px; }
-    h1 { font-size: 18px; margin: 0 0 12px; }
-    button { padding: 10px 12px; font-size: 14px; }
-    pre { background: #f6f8fa; padding: 12px; border-radius: 8px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
-    .hint { color: #666; font-size: 12px; margin-top: 6px; }
+    :root { color-scheme: light dark; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; }
+    header { padding: 16px 18px; border-bottom: 1px solid rgba(127,127,127,.25); }
+    h1 { margin: 0; font-size: 18px; }
+    main { padding: 16px 18px; display: grid; gap: 12px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    button { padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: transparent; cursor: pointer; }
+    button:hover { border-color: rgba(127,127,127,.7); }
+    label { display: inline-flex; gap: 6px; align-items: center; }
+    input[type="checkbox"] { transform: translateY(1px); }
+    .card { border: 1px solid rgba(127,127,127,.25); border-radius: 14px; padding: 12px; }
+    .muted { opacity: .75; font-size: 12px; }
+    pre { margin: 0; padding: 12px; overflow: auto; border-radius: 12px; background: rgba(127,127,127,.10); }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 980px) {
+      .grid { grid-template-columns: 1fr 1fr; }
+    }
+    .pill { display:inline-flex; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(127,127,127,.35); font-size: 12px; }
+    .ok { opacity: .95; }
+    .bad { opacity: .95; }
   </style>
 </head>
+
 <body>
-  <h1>JS 能力画像采样（iPhone / iOS Chrome）</h1>
-  <div class="row">
-    <button id="btnRefresh">重新采样</button>
-    <button id="btnCopy">复制 JSON</button>
+<header>
+  <h1>fingerprint-demo / WebGL 信息采集（更全版）</h1>
+  <div class="muted">只读 WebGL 能力、扩展与精度表；不做 readPixels 渲染指纹。</div>
+</header>
+
+<main>
+  <div class="card">
+    <div class="row">
+      <button id="btnRun">重新采集</button>
+      <button id="btnCopy">复制 JSON</button>
+      <span id="status" class="pill">idle</span>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <label><input id="optWebgl2" type="checkbox" checked /> 采集 WebGL2（若支持）</label>
+      <label><input id="optExtDetails" type="checkbox" checked /> 扩展详情（getExtension + 常量）</label>
+      <label><input id="optPrecision" type="checkbox" checked /> Shader 精度表</label>
+      <label><input id="optAllParams" type="checkbox" checked /> 更多 getParameter 项</label>
+    </div>
   </div>
-  <pre id="out">Loading...</pre>
-  <div class="hint">
-    提示：用 iPhone Chrome 打开本页，点“复制 JSON”，粘贴回你桌面 Chromium 的对比结果即可。
+
+  <div class="grid">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>概览</div>
+        <div class="muted">webgl1 / webgl2</div>
+      </div>
+      <pre id="summary"></pre>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>完整 JSON</div>
+        <div class="muted">用于你现有上报结构</div>
+      </div>
+      <pre id="out"></pre>
+    </div>
   </div>
+</main>
 
 <script>
-(function () {
+  // -------- helpers --------
+  function nowMs() { return (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now(); }
+
   function safe(fn, fallback = null) {
-    try { return fn(); } catch (e) { return fallback; }
+    try { return fn(); } catch { return fallback; }
   }
 
-  function getWebGLInfo() {
-    const canvas = document.createElement('canvas');
-    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-    if (!gl) return { supported: false };
+  function toPlain(val) {
+    if (val == null) return val;
 
-    const debug = gl.getExtension('WEBGL_debug_renderer_info');
-    const vendor = debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : null;
-    const renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : null;
+    // Typed arrays
+    if (val instanceof Int32Array || val instanceof Uint32Array || val instanceof Float32Array) {
+      return Array.from(val);
+    }
 
-    return {
+    // WebGL objects
+    const t = Object.prototype.toString.call(val);
+    if (t === "[object WebGLBuffer]" || t === "[object WebGLTexture]" || t === "[object WebGLProgram]" ||
+        t === "[object WebGLShader]" || t === "[object WebGLFramebuffer]" || t === "[object WebGLRenderbuffer]" ||
+        t === "[object WebGLUniformLocation]" || t === "[object WebGLVertexArrayObject]") {
+      return t.slice(8, -1);
+    }
+
+    // Array
+    if (Array.isArray(val)) return val.map(toPlain);
+
+    // Plain object
+    if (typeof val === "object") {
+      const out = {};
+      for (const k of Object.keys(val)) out[k] = toPlain(val[k]);
+      return out;
+    }
+
+    return val;
+  }
+
+  function pretty(obj) {
+    return JSON.stringify(obj, null, 2);
+  }
+
+  // -------- WebGL collection --------
+  function collectWebGL(kind, opts) {
+    const canvas = document.createElement("canvas");
+    // 尽量减少额外开销 & 让结果更稳定
+    const gl = safe(() => canvas.getContext(kind, {
+      alpha: true,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      premultipliedAlpha: true,
+      preserveDrawingBuffer: false,
+      desynchronized: false,
+      powerPreference: "default",
+      failIfMajorPerformanceCaveat: false,
+    }), null);
+
+    if (!gl) {
+      return { supported: false, kind };
+    }
+
+    const getParam = (p) => toPlain(safe(() => gl.getParameter(p), null));
+
+    const out = {
       supported: true,
-      version: safe(() => gl.getParameter(gl.VERSION)),
-      shadingLanguageVersion: safe(() => gl.getParameter(gl.SHADING_LANGUAGE_VERSION)),
-      vendorMasked: safe(() => gl.getParameter(gl.VENDOR)),
-      rendererMasked: safe(() => gl.getParameter(gl.RENDERER)),
-      vendorUnmasked: vendor,
-      rendererUnmasked: renderer,
-      extensionsCount: safe(() => gl.getSupportedExtensions().length, null)
+      kind,
+      version: getParam(gl.VERSION),
+      shadingLanguageVersion: getParam(gl.SHADING_LANGUAGE_VERSION),
+      vendorMasked: getParam(gl.VENDOR),
+      rendererMasked: getParam(gl.RENDERER),
+      extensionsCount: 0
     };
+
+    // Unmasked vendor/renderer
+    const dbg = safe(() => gl.getExtension("WEBGL_debug_renderer_info"), null);
+    if (dbg) {
+      out.vendorUnmasked = getParam(dbg.UNMASKED_VENDOR_WEBGL);
+      out.rendererUnmasked = getParam(dbg.UNMASKED_RENDERER_WEBGL);
+    } else {
+      out.vendorUnmasked = null;
+      out.rendererUnmasked = null;
+    }
+
+    // Basic caps (always)
+    const baseParams = {
+      // sizes & limits
+      MAX_TEXTURE_SIZE: gl.MAX_TEXTURE_SIZE,
+      MAX_CUBE_MAP_TEXTURE_SIZE: gl.MAX_CUBE_MAP_TEXTURE_SIZE,
+      MAX_RENDERBUFFER_SIZE: gl.MAX_RENDERBUFFER_SIZE,
+      MAX_VIEWPORT_DIMS: gl.MAX_VIEWPORT_DIMS,
+      MAX_VERTEX_ATTRIBS: gl.MAX_VERTEX_ATTRIBS,
+
+      // texture units
+      MAX_TEXTURE_IMAGE_UNITS: gl.MAX_TEXTURE_IMAGE_UNITS,
+      MAX_COMBINED_TEXTURE_IMAGE_UNITS: gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS,
+      MAX_VERTEX_TEXTURE_IMAGE_UNITS: gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS,
+
+      // shader limits
+      MAX_VARYING_VECTORS: gl.MAX_VARYING_VECTORS,
+      MAX_VERTEX_UNIFORM_VECTORS: gl.MAX_VERTEX_UNIFORM_VECTORS,
+      MAX_FRAGMENT_UNIFORM_VECTORS: gl.MAX_FRAGMENT_UNIFORM_VECTORS,
+
+      // ranges
+      ALIASED_LINE_WIDTH_RANGE: gl.ALIASED_LINE_WIDTH_RANGE,
+      ALIASED_POINT_SIZE_RANGE: gl.ALIASED_POINT_SIZE_RANGE,
+
+      // buffer bits
+      RED_BITS: gl.RED_BITS,
+      GREEN_BITS: gl.GREEN_BITS,
+      BLUE_BITS: gl.BLUE_BITS,
+      ALPHA_BITS: gl.ALPHA_BITS,
+      DEPTH_BITS: gl.DEPTH_BITS,
+      STENCIL_BITS: gl.STENCIL_BITS,
+
+      // misc
+      SUBPIXEL_BITS: gl.SUBPIXEL_BITS,
+      SAMPLE_BUFFERS: gl.SAMPLE_BUFFERS,
+      SAMPLES: gl.SAMPLES,
+
+      // implementation hints
+      UNPACK_ALIGNMENT: gl.UNPACK_ALIGNMENT,
+      PACK_ALIGNMENT: gl.PACK_ALIGNMENT
+    };
+
+    // More params (optional, still safe)
+    const moreParams = opts.allParams ? {
+      // line/point/granularity
+      ALIASED_LINE_WIDTH_RANGE: gl.ALIASED_LINE_WIDTH_RANGE,
+      ALIASED_POINT_SIZE_RANGE: gl.ALIASED_POINT_SIZE_RANGE,
+
+      // color/depth/stencil formats
+      IMPLEMENTATION_COLOR_READ_FORMAT: gl.IMPLEMENTATION_COLOR_READ_FORMAT,
+      IMPLEMENTATION_COLOR_READ_TYPE: gl.IMPLEMENTATION_COLOR_READ_TYPE,
+
+      // precision-related
+      MAX_TEXTURE_LOD_BIAS: gl.MAX_TEXTURE_LOD_BIAS,
+
+      // framebuffer
+      MAX_COLOR_ATTACHMENTS_WEBGL: null, // webgl1 may not have
+      MAX_DRAW_BUFFERS_WEBGL: null,
+
+      // uniforms
+      MAX_VERTEX_UNIFORM_COMPONENTS: null,
+      MAX_FRAGMENT_UNIFORM_COMPONENTS: null,
+
+      // attributes
+      MAX_VERTEX_ATTRIBS: gl.MAX_VERTEX_ATTRIBS,
+
+      // anisotropy (via ext later)
+    } : {};
+
+    out.parameters = {};
+    for (const [name, p] of Object.entries(baseParams)) out.parameters[name] = getParam(p);
+
+    if (opts.allParams) {
+      // only include keys that exist on gl (avoid exceptions)
+      for (const [name, maybe] of Object.entries(moreParams)) {
+        if (maybe == null) continue;
+        out.parameters[name] = getParam(maybe);
+      }
+    }
+
+    // Shader precision
+    if (opts.precision) {
+      function prec(shaderType, precisionType) {
+        const f = safe(() => gl.getShaderPrecisionFormat(shaderType, precisionType), null);
+        return f ? { rangeMin: f.rangeMin, rangeMax: f.rangeMax, precision: f.precision } : null;
+      }
+      out.precision = {
+        vertex: {
+          lowFloat: prec(gl.VERTEX_SHADER, gl.LOW_FLOAT),
+          mediumFloat: prec(gl.VERTEX_SHADER, gl.MEDIUM_FLOAT),
+          highFloat: prec(gl.VERTEX_SHADER, gl.HIGH_FLOAT),
+          lowInt: prec(gl.VERTEX_SHADER, gl.LOW_INT),
+          mediumInt: prec(gl.VERTEX_SHADER, gl.MEDIUM_INT),
+          highInt: prec(gl.VERTEX_SHADER, gl.HIGH_INT),
+        },
+        fragment: {
+          lowFloat: prec(gl.FRAGMENT_SHADER, gl.LOW_FLOAT),
+          mediumFloat: prec(gl.FRAGMENT_SHADER, gl.MEDIUM_FLOAT),
+          highFloat: prec(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT),
+          lowInt: prec(gl.FRAGMENT_SHADER, gl.LOW_INT),
+          mediumInt: prec(gl.FRAGMENT_SHADER, gl.MEDIUM_INT),
+          highInt: prec(gl.FRAGMENT_SHADER, gl.HIGH_INT),
+        },
+      };
+    }
+
+    // Extensions list
+    const exts = safe(() => gl.getSupportedExtensions(), []) || [];
+    out.extensions = exts.slice().sort();
+    out.extensionsCount = out.extensions.length;
+
+    if (opts.extDetails) {
+      out.extensionObjects = {};
+      out.extensionConstants = {};
+
+      for (const extName of out.extensions) {
+        const obj = safe(() => gl.getExtension(extName), null);
+        out.extensionObjects[extName] = obj ? (obj.constructor && obj.constructor.name) || "object" : null;
+
+        // Read any numeric constants on the extension object (best-effort)
+        if (obj) {
+          const constants = {};
+          for (const k of Object.keys(obj)) {
+            const v = obj[k];
+            if (typeof v === "number") constants[k] = v;
+          }
+          // Some extensions expose constants via prototype (rare); try a shallow scan
+          const proto = Object.getPrototypeOf(obj);
+          if (proto && proto !== Object.prototype) {
+            for (const k of Object.getOwnPropertyNames(proto)) {
+              const v = safe(() => obj[k], undefined);
+              if (typeof v === "number" && constants[k] === undefined) constants[k] = v;
+            }
+          }
+
+          // If extension provides a parameter that can be queried, try common ones
+          // (Example: EXT_texture_filter_anisotropic)
+          if (extName === "EXT_texture_filter_anisotropic") {
+            const maxAniso = safe(() => gl.getParameter(obj.MAX_TEXTURE_MAX_ANISOTROPY_EXT), null);
+            constants["MAX_TEXTURE_MAX_ANISOTROPY_EXT_value"] = toPlain(maxAniso);
+          }
+
+          if (Object.keys(constants).length) out.extensionConstants[extName] = constants;
+        }
+      }
+    }
+
+    // WebGL2 extra params
+    if (kind === "webgl2") {
+      const p2 = {
+        // 3D textures & arrays
+        MAX_3D_TEXTURE_SIZE: gl.MAX_3D_TEXTURE_SIZE,
+        MAX_ARRAY_TEXTURE_LAYERS: gl.MAX_ARRAY_TEXTURE_LAYERS,
+        MAX_TEXTURE_LOD_BIAS: gl.MAX_TEXTURE_LOD_BIAS,
+
+        // draw buffers / attachments
+        MAX_COLOR_ATTACHMENTS: gl.MAX_COLOR_ATTACHMENTS,
+        MAX_DRAW_BUFFERS: gl.MAX_DRAW_BUFFERS,
+
+        // UBO
+        MAX_UNIFORM_BUFFER_BINDINGS: gl.MAX_UNIFORM_BUFFER_BINDINGS,
+        MAX_UNIFORM_BLOCK_SIZE: gl.MAX_UNIFORM_BLOCK_SIZE,
+        UNIFORM_BUFFER_OFFSET_ALIGNMENT: gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT,
+
+        // transform feedback
+        MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS: gl.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS,
+        MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS: gl.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS,
+        MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS: gl.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS,
+
+        // varyings / attribs
+        MAX_VARYING_COMPONENTS: gl.MAX_VARYING_COMPONENTS,
+        MAX_VERTEX_UNIFORM_COMPONENTS: gl.MAX_VERTEX_UNIFORM_COMPONENTS,
+        MAX_FRAGMENT_UNIFORM_COMPONENTS: gl.MAX_FRAGMENT_UNIFORM_COMPONENTS,
+
+        // samples
+        MAX_SAMPLES: gl.MAX_SAMPLES,
+
+        // element indices
+        MAX_ELEMENTS_VERTICES: gl.MAX_ELEMENTS_VERTICES,
+        MAX_ELEMENTS_INDICES: gl.MAX_ELEMENTS_INDICES,
+      };
+
+      out.parametersWebGL2 = {};
+      for (const [name, p] of Object.entries(p2)) out.parametersWebGL2[name] = getParam(p);
+    }
+
+    return out;
   }
 
-  function getUAData() {
-    const uad = navigator.userAgentData;
-    if (!uad) return null;
+  function buildPayload(opts) {
+    const t0 = nowMs();
+    const webgl1 = collectWebGL("webgl", opts);
+    const webgl2 = opts.webgl2 ? collectWebGL("webgl2", opts) : { supported: false, kind: "webgl2" };
 
-    // brands 可能是 BrandVersion 数组
-    const brands = safe(() => uad.brands || uad.uaList, null);
+    // 按你现有结构：保留 webgl 字段，同时额外加 webgl2 / webglFull
+    const payload = {
+      ts: new Date().toISOString(),
+      webgl: {
+        supported: webgl1.supported,
+        version: webgl1.version,
+        shadingLanguageVersion: webgl1.shadingLanguageVersion,
+        vendorMasked: webgl1.vendorMasked,
+        rendererMasked: webgl1.rendererMasked,
+        vendorUnmasked: webgl1.vendorUnmasked,
+        rendererUnmasked: webgl1.rendererUnmasked,
+        extensionsCount: webgl1.extensionsCount
+      },
+      // 新增：更全的数据（不破坏你原来的字段）
+      webglFull: webgl1,
+      webgl2Full: webgl2,
+      costMs: Math.round((nowMs() - t0) * 1000) / 1000
+    };
 
+    return payload;
+  }
+
+  // -------- UI --------
+  const $ = (id) => document.getElementById(id);
+
+  function setStatus(text, ok=true) {
+    const el = $("status");
+    el.textContent = text;
+    el.className = "pill " + (ok ? "ok" : "bad");
+  }
+
+  function render(payload) {
+    $("out").textContent = pretty(payload);
+
+    const s = {
+      costMs: payload.costMs,
+      webgl1_supported: payload.webglFull.supported,
+      webgl1_vendor: payload.webgl.vendorUnmasked || payload.webgl.vendorMasked,
+      webgl1_renderer: payload.webgl.rendererUnmasked || payload.webgl.rendererMasked,
+      webgl1_extCount: payload.webgl.extensionsCount,
+      webgl2_supported: payload.webgl2Full.supported,
+      webgl2_extCount: payload.webgl2Full.supported ? payload.webgl2Full.extensionsCount : 0
+    };
+    $("summary").textContent = pretty(s);
+  }
+
+  function getOpts() {
     return {
-      platform: safe(() => uad.platform, null),
-      mobile: safe(() => uad.mobile, null),
-      brands: brands,
-      // getHighEntropyValues 在 iOS 上通常不可用/行为不同，做成可选项
-      highEntropy: safe(() => {
-        if (!uad.getHighEntropyValues) return null;
-        return uad.getHighEntropyValues([
-          "architecture","bitness","model","platform","platformVersion",
-          "uaFullVersion","fullVersionList","wow64"
-        ]);
-      }, null)
+      webgl2: $("optWebgl2").checked,
+      extDetails: $("optExtDetails").checked,
+      precision: $("optPrecision").checked,
+      allParams: $("optAllParams").checked,
     };
   }
 
-  async function snapshot() {
-    const nav = navigator;
-
-    const data = {
-      meta: {
-        capturedAt: new Date().toISOString(),
-        locationHint: safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone, null),
-        page: { href: location.href }
-      },
-
-      navigator: {
-        userAgent: nav.userAgent,
-        platform: safe(() => nav.platform, null),
-        vendor: safe(() => nav.vendor, null),
-        language: safe(() => nav.language, null),
-        languages: safe(() => nav.languages, null),
-        hardwareConcurrency: safe(() => nav.hardwareConcurrency, null),
-        deviceMemory: safe(() => nav.deviceMemory, null),
-        maxTouchPoints: safe(() => nav.maxTouchPoints, null),
-        webdriver: safe(() => nav.webdriver, null),
-        cookieEnabled: safe(() => nav.cookieEnabled, null),
-        doNotTrack: safe(() => nav.doNotTrack, null),
-        userAgentData: getUAData()
-      },
-
-      window: {
-        // iOS/桌面差异点
-        hasWindowChrome: !!window.chrome,
-        devicePixelRatio: safe(() => window.devicePixelRatio, null),
-        innerWidth: safe(() => window.innerWidth, null),
-        innerHeight: safe(() => window.innerHeight, null)
-      },
-
-      mediaQueries: {
-        hoverHover: safe(() => matchMedia("(hover: hover)").matches, null),
-        hoverNone: safe(() => matchMedia("(hover: none)").matches, null),
-        pointerCoarse: safe(() => matchMedia("(pointer: coarse)").matches, null),
-        pointerFine: safe(() => matchMedia("(pointer: fine)").matches, null),
-        anyHover: safe(() => matchMedia("(any-hover: hover)").matches, null),
-        anyPointerCoarse: safe(() => matchMedia("(any-pointer: coarse)").matches, null),
-        prefersReducedMotion: safe(() => matchMedia("(prefers-reduced-motion: reduce)").matches, null),
-        prefersColorSchemeDark: safe(() => matchMedia("(prefers-color-scheme: dark)").matches, null)
-      },
-
-      capabilities: {
-        mediaDevices: !!(nav.mediaDevices && nav.mediaDevices.enumerateDevices),
-        rtcPeerConnection: !!window.RTCPeerConnection,
-        serviceWorker: "serviceWorker" in nav,
-        webAssembly: "WebAssembly" in window,
-        sharedArrayBuffer: "SharedArrayBuffer" in window,
-        bluetooth: "bluetooth" in nav,
-        clipboard: !!(nav.clipboard && nav.clipboard.writeText),
-        geolocation: "geolocation" in nav,
-        deviceMotionEvent: "DeviceMotionEvent" in window,
-        deviceOrientationEvent: "DeviceOrientationEvent" in window
-      },
-
-      webgl: getWebGLInfo()
-    };
-
-    // 如果 highEntropy 是 Promise（Chromium 系），await 一下
-    if (data.navigator.userAgentData && data.navigator.userAgentData.highEntropy instanceof Promise) {
-      data.navigator.userAgentData.highEntropy = await data.navigator.userAgentData.highEntropy.catch(() => null);
-    }
-
-    return data;
+  async function run() {
+    setStatus("collecting…");
+    const payload = buildPayload(getOpts());
+    render(payload);
+    setStatus("done");
+    window.__FP_DEMO_PAYLOAD__ = payload;
   }
 
-  async function render() {
-    const out = document.getElementById("out");
-    out.textContent = "Sampling...";
-    const data = await snapshot();
-    window.__CAP_SNAPSHOT__ = data;
-    out.textContent = JSON.stringify(data, null, 2);
-  }
-
-  document.getElementById("btnRefresh").addEventListener("click", render);
-
-  document.getElementById("btnCopy").addEventListener("click", async () => {
-    const txt = JSON.stringify(window.__CAP_SNAPSHOT__ ?? {}, null, 2);
-    try {
-      await navigator.clipboard.writeText(txt);
-      alert("已复制到剪贴板");
-    } catch (e) {
-      // iOS 可能剪贴板权限限制，退化：选中输出让你手动复制
-      const out = document.getElementById("out");
-      const range = document.createRange();
-      range.selectNodeContents(out);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-      alert("无法直接写剪贴板：已选中文本，请手动复制");
-    }
+  $("btnRun").addEventListener("click", run);
+  $("btnCopy").addEventListener("click", async () => {
+    const text = $("out").textContent || "";
+    await navigator.clipboard.writeText(text);
+    setStatus("copied");
+    setTimeout(() => setStatus("done"), 600);
   });
 
-  render();
-})();
+  // auto-run
+  run();
 </script>
 </body>
 </html>
